@@ -88,7 +88,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                         if (i + 1 < args.Length)
                         {
                             _apiKey = args[i + 1];
-                            i++; 
+                            i++;
                         }
                         else
                         {
@@ -99,26 +99,54 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     case "-proxy":
                         if (i + 1 < args.Length)
                         {
-                            var proxySettings = args[i + 1].Split(':');
-                            if (proxySettings.Length == 1)
+                            var proxyAddressString = args[i + 1];
+                            var proxyAddress = string.Empty;
+                            var proxyUsername = string.Empty;
+                            var proxyPassword = string.Empty;
+
+                            if (proxyAddressString.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
                             {
-                                _proxyAddress = proxySettings[0];
-                                _proxyUsername = null;
-                                _proxyPassword = null;
-                            }
-                            else if (proxySettings.Length == 3)
-                            {
-                                _proxyAddress = proxySettings[0];
-                                _proxyUsername = proxySettings[1];
-                                _proxyPassword = proxySettings[2];
+                                var proxySettings = proxyAddressString.Substring("socks5://".Length).Split(':'); // Удаляем socks5:// для разбора параметров
+                                if (proxySettings.Length == 2)
+                                {
+                                    _proxyAddress = proxyAddressString; // Сохраняем исходную строку, включая socks5://
+                                    _proxyUsername = null;
+                                    _proxyPassword = null;
+                                }
+                                else if (proxySettings.Length >= 4)
+                                {
+                                    _proxyAddress = proxyAddressString; // Сохраняем исходную строку, включая socks5://
+                                    _proxyUsername = proxySettings[2];
+                                    _proxyPassword = string.Join(":", proxySettings.Skip(3));
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Invalid proxy format. Use -proxy address:port or -proxy address:port:username:password or -proxy socks5://address:port or -proxy socks5://address:port:username:password");
+                                    return;
+                                }
                             }
                             else
                             {
-                                Console.WriteLine("Invalid proxy format. Use -proxy address or -proxy address:username:password");
-                                return;
+                                var proxySettings = proxyAddressString.Split(':');
+                                if (proxySettings.Length == 2)
+                                {
+                                    _proxyAddress = proxyAddressString;
+                                    _proxyUsername = null;
+                                    _proxyPassword = null;
+                                }
+                                else if (proxySettings.Length >= 4)
+                                {
+                                    _proxyAddress = proxyAddressString;
+                                    _proxyUsername = proxySettings[2];
+                                    _proxyPassword = string.Join(":", proxySettings.Skip(3));
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Invalid proxy format. Use -proxy address:port or -proxy address:port:username:password or -proxy socks5://address:port or -proxy socks5://address:port:username:password");
+                                    return;
+                                }
                             }
-
-                            i++; 
+                            i++;
                         }
                         else
                         {
@@ -136,22 +164,37 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             //Console.WriteLine($"Using API Key: {_apiKey}");
             //Console.WriteLine($"Using Proxy: {_proxyAddress}, User: {_proxyUsername}");
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("fkAnonAi v1.0.0 https://t.me/furrykit");
+            Console.WriteLine("fkAnonAi v1.0.1 https://t.me/furrykit");
             Console.ResetColor();
             // Настройки прокси
             HttpClient httpClient = null;
             if (!string.IsNullOrEmpty(_proxyAddress))
             {
                 Console.WriteLine("Using proxy server.");
-                var handler = new HttpClientHandler()
+                var handler = new HttpClientHandler();
+
+                if (_proxyAddress.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
                 {
-                    Proxy = new WebProxy(_proxyAddress)
+                    var uriBuilder = new UriBuilder(_proxyAddress);
+                    handler.Proxy = new WebProxy(uriBuilder.Uri)
                     {
                         Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
                         ? new NetworkCredential(_proxyUsername, _proxyPassword)
                         : null
-                    }
-                };
+                    };
+                }
+                else
+                {
+                    var proxySettings = _proxyAddress.Split(':');
+                    string address = $"{proxySettings[0]}:{proxySettings[1]}";
+                    handler.Proxy = new WebProxy(address)
+                    {
+                        Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
+                      ? new NetworkCredential(_proxyUsername, _proxyPassword)
+                      : null
+                    };
+                }
+
                 httpClient = new HttpClient(handler);
             }
 
@@ -270,7 +313,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             };
 
 
-            waveIn.DataAvailable += (sender, e) => 
+            waveIn.DataAvailable += (sender, e) =>
             {
                 var buffer = e.Buffer.Take(e.BytesRecorded).ToArray();
                 double averageAmplitude = CalculateAverageAmplitude(buffer);
