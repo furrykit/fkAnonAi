@@ -1,14 +1,15 @@
-﻿using Whisper.net;
-using Whisper.net.Ggml;
-using NAudio.Wave;
+﻿using GenerativeAI.Methods;
 using GenerativeAI.Models;
 using GenerativeAI.Types;
+using NAudio.Wave;
 using SherpaOnnx;
-using GenerativeAI.Methods;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
+using System.IO;
+using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace fkAnonAi
 {
@@ -16,13 +17,11 @@ namespace fkAnonAi
     {
         private static List<byte> _audioBuffer = new List<byte>();
         private static int _maxRetries = 1;
-        private static WhisperProcessor? _whisperProcessor;
         private static string? _apiKey = "default_key"; // Default API Key
         private static double _amplitudeThreshold = 0.02;
         private static int _selectedDeviceNumber = 0;
         private static Queue<byte[]> _audioQueue = new Queue<byte[]>();
         private static bool _isProcessing = false;
-        private static string _lastProcessedText = "";
         private static bool _isRecording = false;
         private static DateTime _lastAmplitudeAboveThresholdTime = DateTime.MinValue;
         private const int _silenceDelayMs = 3000; // Задержка до деактивации микрофона
@@ -55,7 +54,16 @@ GLaDOS всегда пытается шутить о нем остроумно, 
         private static string? _proxyAddress = "127.0.0.1:31112";  // Default прокси
         private static string? _proxyUsername = "username"; // Default логин для прокси
         private static string? _proxyPassword = "password";  // Default пароль для прокси
-        private const string CustomWhisperDirectory = "customwhisper";
+
+        [DllImport("user32.dll")]
+        static extern bool GetKeyState(int nVirtKey);
+
+        private static bool IsCapsLockActive()
+        {
+            return GetKeyState(0x14); // 0x14 is the virtual-key code for Caps Lock
+        }
+
+        private static bool _lastCapsLockState = false; // Store the last known state of Caps Lock
 
         public static async Task Main(string[] args)
         {
@@ -159,12 +167,11 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             Console.WriteLine("Для использования своего прокси добавьте в параметры запуска -proxy ip:port:username:password");
             Console.WriteLine("Для использования своего api ключа добавьте в параметры запуска -api ключ");
             Console.WriteLine("Сгенерировать свой api ключ можно по ссылке https://aistudio.google.com/apikey");
-            Console.WriteLine("Для использования своей модели распознавания, нужно либо использовать готовую ggml модель, либо конвертировать интересующую pytorch модель https://github.com/ggerganov/whisper.cpp/tree/master/models подробнее https://github.com/sandrohanea/whisper.net");
             Console.WriteLine("Для использования своей модели озвучки текста можно использовать готовые модели https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models либо обучить/сконвертировать собственную. подробнее: https://k2-fsa.github.io/sherpa/onnx/tts/piper.html");
             //Console.WriteLine($"Using API Key: {_apiKey}");
             //Console.WriteLine($"Using Proxy: {_proxyAddress}, User: {_proxyUsername}");
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("fkAnonAi v1.0.1 https://t.me/furrykit");
+            Console.WriteLine("fkAnonAi v1.0.2 https://t.me/furrykit");
             Console.ResetColor();
             // Настройки прокси
             HttpClient httpClient = null;
@@ -197,37 +204,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
                 httpClient = new HttpClient(handler);
             }
-
-            string modelFileName = null;
-            GgmlType ggmlType = GgmlType.Small;
-
-
-            // Проверяем наличие кастомной модели
-            string customModelPath = Path.Combine(CustomWhisperDirectory, "model.bin"); // https://huggingface.co/sBPOH/whisper-small-ru-1k-steps-ggml
-            bool usingCustomModel = false;
-            if (File.Exists(customModelPath))
-            {
-                modelFileName = customModelPath;
-                usingCustomModel = true;
-            }
-            else
-            {
-                Console.WriteLine("Custom Whisper model not found. Defaulting to small model.");
-                modelFileName = "ggml-small.bin";
-                if (!File.Exists(modelFileName))
-                {
-                    await DownloadModel(modelFileName, ggmlType);
-                }
-
-            }
-
-            Console.WriteLine($"Using Whisper model: {modelFileName}.");
-            using var whisperFactory = WhisperFactory.FromPath(modelFileName);
-
-            _whisperProcessor = whisperFactory.CreateBuilder()
-                .WithLanguage("ru")
-                .Build();
-            Console.WriteLine("Whisper initialized successfully.");
 
 
             Console.WriteLine("Подключаемся к серверам Google...");
@@ -315,6 +291,18 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
             waveIn.DataAvailable += (sender, e) =>
             {
+                if (IsCapsLockActive())
+                {
+                    // Если Caps Lock включен, не обрабатываем звук
+                    if (_isRecording)
+                    {
+                        // Console.WriteLine("Caps Lock активирован. Деактивация микрофона...");
+                        _isRecording = false;
+                        _audioBuffer.Clear();  // Очищаем буфер
+                    }
+                    return;
+                }
+
                 var buffer = e.Buffer.Take(e.BytesRecorded).ToArray();
                 double averageAmplitude = CalculateAverageAmplitude(buffer);
 
@@ -357,6 +345,30 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
             };
 
+            // Добавим Timer для периодической проверки Caps Lock и деактивации микрофона
+            System.Timers.Timer capsLockTimer = new System.Timers.Timer(100); // Проверяем каждые 100 мс
+            capsLockTimer.Elapsed += (sender, e) =>
+            {
+                bool capsLockState = IsCapsLockActive();
+                if (capsLockState != _lastCapsLockState)
+                {
+                    Console.WriteLine($"Caps Lock: {(capsLockState ? "Включен, запись не активна" : "Выключен, запись активна")}. ");
+                    _lastCapsLockState = capsLockState;
+                }
+
+
+                if (capsLockState && _isRecording)
+                {
+                    // Console.WriteLine("Caps Lock активирован. Деактивация микрофона...");
+                    _isRecording = false;
+                    _audioBuffer.Clear();
+                }
+            };
+            capsLockTimer.Start();
+
+            // Set initial Caps Lock state
+            _lastCapsLockState = IsCapsLockActive();
+
             waveIn.StartRecording();
 
             _ = Task.Run(async () => await ProcessAudioQueue(waveIn));
@@ -371,6 +383,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 {
                     _screenAnalysisTimer?.Stop();
                     waveIn.StopRecording();
+                    capsLockTimer.Stop();
                     break;
                 }
                 else if (input?.StartsWith("interval ") == true)
@@ -498,7 +511,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             try
             {
                 // Console.WriteLine("Analyzing screen...");
-                byte[] imageBytes = CaptureScreen(); // (true) чтобы включить сохранение скриншотов для отладки 
+                byte[] imageBytes = CaptureScreen(); // (true) чтобы включить сохранение скриншотов для отладки
                 if (imageBytes.Length == 0)
                 {
                     return; // если захват не удался, выходим
@@ -586,7 +599,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     byte[] bufferToProcess = _audioQueue.Dequeue();
                     try
                     {
-                        await ProcessAudioBuffer(waveIn, bufferToProcess);
+                        await ProcessAudioBuffer(waveIn, bufferToProcess, waveIn.WaveFormat); // Передаем waveFormat
                     }
                     finally
                     {
@@ -596,64 +609,45 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 await Task.Delay(1);
             }
         }
-        private static async Task ProcessAudioBuffer(WaveInEvent waveIn, byte[] buffer)
+        private static async Task ProcessAudioBuffer(WaveInEvent waveIn, byte[] buffer, WaveFormat waveFormat)
         {
-            string tempFile = Path.Combine(Directory.GetCurrentDirectory(), $"temp_audio_{Guid.NewGuid()}.wav");
-
             try
             {
-                using (var writer = new WaveFileWriter(tempFile, waveIn.WaveFormat))
+                // Сохраняем аудио в файл для отладки
+                //string debugAudioPath = Path.Combine(Directory.GetCurrentDirectory(), $"debug_audio_{DateTime.Now:yyyyMMdd_HHmmss_fff}.wav");
+                //try
+                //{
+                //    using (WaveFileWriter waveFileWriter = new WaveFileWriter(debugAudioPath, waveFormat))
+                //    {
+                //        waveFileWriter.Write(buffer, 0, buffer.Length);
+                //    }
+                //    Console.WriteLine($"Сохранено аудио для отладки: {debugAudioPath}");
+                //}
+                //catch (Exception ex)
+                //{
+                //    Console.WriteLine($"Ошибка при сохранении отладочного аудио: {ex.Message}");
+                //}
+
+                // Захватываем скриншот
+                byte[] imageBytes = CaptureScreen();
+
+                // Отправляем WAV файл и скриншот напрямую в Gemini API
+                string geminiResponse = await SendAudioAndImageWithRetries(buffer, waveFormat, imageBytes);
+                if (!string.IsNullOrEmpty(geminiResponse))
                 {
-                    await Task.Run(() => writer.Write(buffer, 0, buffer.Length));
+                    _ttsQueue.Enqueue(geminiResponse);
                 }
-
-                using (var fileStream = File.OpenRead(tempFile))
+                else
                 {
-                    string youSaidText = "";
-                    if (_whisperProcessor != null)
-                    {
-                        await foreach (var result in _whisperProcessor.ProcessAsync(fileStream))
-                        {
-                            if (!string.IsNullOrWhiteSpace(result.Text) && result.Text != "[BLANK_AUDIO]")
-                            {
-                                youSaidText += result.Text + " ";
-                            }
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(youSaidText) && youSaidText != _lastProcessedText)
-                        {
-                            if (_isTtsPlaying)
-                            {
-                                StopTtsPlayback();
-                            }
-                            Console.WriteLine($"Вы сказали: {youSaidText}");
-                            Console.WriteLine("GLaDOS думает...");
-                            byte[] imageBytes = CaptureScreen(); // (true) чтобы включить сохранение скриншотов для отладки 
-                            string geminiResponse = await SendWithRetries(youSaidText, imageBytes);
-                            if (!string.IsNullOrEmpty(geminiResponse))
-                            {
-                                _ttsQueue.Enqueue(geminiResponse);
-                            }
-
-                            _lastProcessedText = youSaidText;
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine("Whisper processor is not initialized.");
-                    }
-
-
+                    Console.WriteLine("Gemini API не вернул текст.");
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing audio buffer: {ex.Message}");
             }
-            finally
-            {
-                File.Delete(tempFile);
-            }
+            finally { }
+
         }
         private static async Task ProcessRequestQueue()
         {
@@ -674,6 +668,104 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 }
                 await Task.Delay(1);
             }
+        }
+
+        private static async Task<string> SendAudioAndImageWithRetries(byte[] audioData, WaveFormat waveFormat, byte[] imageBytes)
+        {
+            int retries = 0;
+            while (retries < _maxRetries)
+            {
+                try
+                {
+                    // Конвертируем byte[] в Stream, чтобы отправить в Part
+                    using (MemoryStream audioStream = new MemoryStream(audioData))
+                    {
+                        // Сохраняем аудио в формате WAV в MemoryStream
+                        using (MemoryStream wavStream = new MemoryStream())
+                        {
+                            using (WaveFileWriter waveFileWriter = new WaveFileWriter(wavStream, waveFormat))
+                            {
+                                waveFileWriter.Write(audioData, 0, audioData.Length);
+                            }
+                            // Получаем byte[] из MemoryStream с WAV
+                            byte[] wavBytes = wavStream.ToArray();
+
+                            var parts = new List<Part>
+                            {
+                                new Part
+                                {
+                                    InlineData = new GenerativeContentBlob()
+                                    {
+                                        Data = Convert.ToBase64String(wavBytes), // Отправляем WAV как base64
+                                        MimeType = "audio/wav" // Указываем MIME type
+                                    }
+                                },
+                                 new Part
+                                {
+                                  InlineData = new GenerativeContentBlob() {
+                                    Data = Convert.ToBase64String(imageBytes),
+                                    //MimeType = "image/png" // для скриншотов в пнг
+                                    MimeType = "image/jpeg"  // для скриншотов в жпеге
+                                }
+                                }
+
+                            };
+
+
+                            if (_chat != null)
+                            {
+                                using (var cts = new CancellationTokenSource(_responseTimeout))
+                                {
+                                    var resultTask = _chat.SendMessageAsync(parts.ToArray(), cts.Token);
+
+                                    var completedTask = await Task.WhenAny(resultTask, Task.Delay(_responseTimeout, cts.Token));
+
+                                    if (completedTask == resultTask)
+                                    {
+                                        var result = await resultTask;
+                                        if (result?.Candidates != null && result.Candidates.Any())
+                                        {
+                                            string? geminiResponse = result.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
+                                            if (!string.IsNullOrEmpty(geminiResponse))
+                                            {
+                                                geminiResponse = geminiResponse.Replace("*", "");
+                                                Console.WriteLine($"GLaDOS: {geminiResponse}\n");
+                                                return geminiResponse;
+                                            }
+                                        }
+                                        Console.WriteLine("Gemini API не вернул текст.");
+                                        return string.Empty;
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine("GLaDOS не ответила вовремя (таймаут).");
+                                        cts.Cancel();
+                                        return string.Empty;
+                                    }
+                                }
+                            }
+                            Console.WriteLine("Chat session is not initialized.");
+                            return string.Empty;
+
+                        }
+
+                    }
+                }
+                catch (GenerativeAI.Exceptions.GenerativeAIException ex) when (ex.Message.Contains("RESOURCE_EXHAUSTED"))
+                {
+                    retries++;
+                    int delay = (int)Math.Pow(2, retries);
+                    Console.WriteLine($"Error: {ex.Message}, retrying in {delay} seconds");
+                    await Task.Delay(delay * 1000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error sending audio: {ex.Message}");
+                    return string.Empty;
+                }
+            }
+            Console.WriteLine($"Failed to send message after {_maxRetries} retries.");
+            return string.Empty;
         }
         private static async Task<string> SendWithRetries(string text, byte[] imageBytes)
         {
@@ -825,35 +917,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 _isTtsPlaying = false;
             }
         }
-        private static async Task DownloadModel(string fileName, GgmlType ggmlType)
-        {
-            Console.WriteLine($"Качаем модель {fileName}");
-            using var modelStream = await WhisperGgmlDownloader.GetGgmlModelAsync(ggmlType);
-            using var fileWriter = File.OpenWrite(fileName);
-            long? totalBytes = modelStream.CanSeek ? modelStream.Length : null; // Проверяем, доступна ли длина потока
-            long totalRead = 0; // Количество прочитанных байтов
-            byte[] buffer = new byte[8192]; // Размер буфера (8 КБ)
-            int bytesRead;
 
-            while ((bytesRead = await modelStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-            {
-                await fileWriter.WriteAsync(buffer, 0, bytesRead);
-                totalRead += bytesRead;
-
-                if (totalBytes.HasValue)
-                {
-                    // Вычисление прогресса в процентах
-                    int progress = (int)((double)totalRead / totalBytes.Value * 100);
-                    Console.Write($"\rПрогресс загрузки: {progress}%"); // Обновление строки в консоли
-                }
-                else
-                {
-                    // Если длина неизвестна, просто показываем объем прочитанных данных
-                    Console.Write($"\rЗагружено: {totalRead / 1024} КБ");
-                }
-            }
-
-            Console.WriteLine("\nМодель успешно загружена.");
-        }
     }
 }
