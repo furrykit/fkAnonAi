@@ -1,15 +1,19 @@
-﻿using GenerativeAI.Methods;
-using GenerativeAI.Models;
+﻿using GenerativeAI;
 using GenerativeAI.Types;
 using NAudio.Wave;
 using SherpaOnnx;
+using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Timers;
 
 namespace fkAnonAi
 {
@@ -17,7 +21,7 @@ namespace fkAnonAi
     {
         private static List<byte> _audioBuffer = new List<byte>();
         private static int _maxRetries = 1;
-        private static string? _apiKey = "default_key"; // Default API Key
+        private static string apiKey = "default_key"; // Default API Key
         private static double _amplitudeThreshold = 0.02;
         private static int _selectedDeviceNumber = 0;
         private static Queue<byte[]> _audioQueue = new Queue<byte[]>();
@@ -27,7 +31,7 @@ namespace fkAnonAi
         private const int _silenceDelayMs = 3000; // Задержка до деактивации микрофона
 
         private static OfflineTts? _tts;
-        private static WaveOutEvent? _outputDevice;
+        private static WaveOutEvent? _outputDevice; // Поле класса
         private static bool _isTtsPlaying = false;
 
         private static GenerativeModel? _model;
@@ -65,6 +69,9 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
         private static bool _lastCapsLockState = false; // Store the last known state of Caps Lock
 
+        // HttpClient instance (shared for better performance)
+        private static HttpClient? _httpClient;
+
         public static async Task Main(string[] args)
         {
             // Проверка и загрузка пользовательского промпта
@@ -95,7 +102,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     case "-api":
                         if (i + 1 < args.Length)
                         {
-                            _apiKey = args[i + 1];
+                            apiKey = args[i + 1];
                             i++;
                         }
                         else
@@ -109,8 +116,8 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                         {
                             var proxyAddressString = args[i + 1];
                             var proxyAddress = string.Empty;
-                            var proxyUsername = string.Empty;
-                            var proxyPassword = string.Empty;
+                            string? proxyUsername = null;
+                            string? proxyPassword = null;
 
                             if (proxyAddressString.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
                             {
@@ -118,14 +125,14 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                                 if (proxySettings.Length == 2)
                                 {
                                     _proxyAddress = proxyAddressString; // Сохраняем исходную строку, включая socks5://
-                                    _proxyUsername = null;
-                                    _proxyPassword = null;
+                                    proxyUsername = null;
+                                    proxyPassword = null;
                                 }
                                 else if (proxySettings.Length >= 4)
                                 {
                                     _proxyAddress = proxyAddressString; // Сохраняем исходную строку, включая socks5://
-                                    _proxyUsername = proxySettings[2];
-                                    _proxyPassword = string.Join(":", proxySettings.Skip(3));
+                                    proxyUsername = proxySettings[2];
+                                    proxyPassword = string.Join(":", proxySettings.Skip(3));
                                 }
                                 else
                                 {
@@ -139,14 +146,14 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                                 if (proxySettings.Length == 2)
                                 {
                                     _proxyAddress = proxyAddressString;
-                                    _proxyUsername = null;
-                                    _proxyPassword = null;
+                                    proxyUsername = null;
+                                    proxyPassword = null;
                                 }
                                 else if (proxySettings.Length >= 4)
                                 {
                                     _proxyAddress = proxyAddressString;
-                                    _proxyUsername = proxySettings[2];
-                                    _proxyPassword = string.Join(":", proxySettings.Skip(3));
+                                    proxyUsername = proxySettings[2];
+                                    proxyPassword = string.Join(":", proxySettings.Skip(3));
                                 }
                                 else
                                 {
@@ -154,6 +161,8 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                                     return;
                                 }
                             }
+                            _proxyUsername = proxyUsername;
+                            _proxyPassword = proxyPassword;
                             i++;
                         }
                         else
@@ -168,62 +177,36 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             Console.WriteLine("Для использования своего api ключа добавьте в параметры запуска -api ключ");
             Console.WriteLine("Сгенерировать свой api ключ можно по ссылке https://aistudio.google.com/apikey");
             Console.WriteLine("Для использования своей модели озвучки текста можно использовать готовые модели https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models либо обучить/сконвертировать собственную. подробнее: https://k2-fsa.github.io/sherpa/onnx/tts/piper.html");
-            //Console.WriteLine($"Using API Key: {_apiKey}");
-            //Console.WriteLine($"Using Proxy: {_proxyAddress}, User: {_proxyUsername}");
+
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("fkAnonAi v1.0.2 https://t.me/furrykit");
+            Console.WriteLine("fkAnonAi v1.0.3 https://t.me/furrykit");
             Console.ResetColor();
-            // Настройки прокси
-            HttpClient httpClient = null;
-            if (!string.IsNullOrEmpty(_proxyAddress))
-            {
-                Console.WriteLine("Using proxy server.");
-                var handler = new HttpClientHandler();
 
-                if (_proxyAddress.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
-                {
-                    var uriBuilder = new UriBuilder(_proxyAddress);
-                    handler.Proxy = new WebProxy(uriBuilder.Uri)
-                    {
-                        Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
-                        ? new NetworkCredential(_proxyUsername, _proxyPassword)
-                        : null
-                    };
-                }
-                else
-                {
-                    var proxySettings = _proxyAddress.Split(':');
-                    string address = $"{proxySettings[0]}:{proxySettings[1]}";
-                    handler.Proxy = new WebProxy(address)
-                    {
-                        Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
-                      ? new NetworkCredential(_proxyUsername, _proxyPassword)
-                      : null
-                    };
-                }
-
-                httpClient = new HttpClient(handler);
-            }
-
+            // Настройки прокси и HttpClient
+            _httpClient = CreateHttpClient();
 
             Console.WriteLine("Подключаемся к серверам Google...");
 
             try
             {
-                _model = new GenerativeModel(_apiKey, "gemini-1.5-flash", client: httpClient); //latest gemini-2.0-flash-exp
+                // 1. Инициализация GoogleAI с передачей _httpClient
+                var googleAI = new GoogleAi(apiKey, client: _httpClient);
+
+                // 2. Получение GenerativeModel
+                _model = googleAI.CreateGenerativeModel("models/gemini-1.5-flash");
 
                 if (_model == null)
                 {
                     Console.WriteLine("Failed to initialize Generative Model");
                     return;
                 }
-                _chat = _model.StartChat(new StartChatParams());
+                _chat = _model.StartChat();
                 if (_chat == null)
                 {
                     Console.WriteLine("Failed to start chat session.");
                     return;
                 }
-                await _chat.SendMessageAsync(_gLaDOSPrompt);
+                GenerateContentResponse initialResponse = await _chat.GenerateContentAsync(_gLaDOSPrompt);
                 Console.WriteLine("Подключение к серверам Google успешно.");
 
 
@@ -276,10 +259,32 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
 
             _screenAnalysisTimer = new System.Timers.Timer(_screenshotInterval);
-            _screenAnalysisTimer.Elapsed += async (sender, e) => await EnqueueScreenAnalysis();
+            _screenAnalysisTimer.Elapsed += (sender, e) =>
+            {
+                _requestQueue.Enqueue(async () =>
+                {
+                    // Захватываем скриншот
+                    byte[] imageBytes = CaptureScreen();
+                    if (imageBytes.Length > 0)
+                    {
+                        string geminiResponse = await SendImageToGemini(imageBytes); // Pass _httpClient
+                        if (!string.IsNullOrEmpty(geminiResponse))
+                        {
+                            _ttsQueue.Enqueue(geminiResponse);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Gemini API не вернул текст.");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Failed to capture screen.");
+                    }
+                });
+            };
+            _screenAnalysisTimer.AutoReset = true;
             _screenAnalysisTimer.Start();
-
-            //Console.WriteLine($"Screen analysis will run every {_screenshotInterval / 1000} seconds.");
 
 
             var waveIn = new WaveInEvent
@@ -296,7 +301,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     // Если Caps Lock включен, не обрабатываем звук
                     if (_isRecording)
                     {
-                        // Console.WriteLine("Caps Lock активирован. Деактивация микрофона...");
                         _isRecording = false;
                         _audioBuffer.Clear();  // Очищаем буфер
                     }
@@ -345,7 +349,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
             };
 
-            // Добавим Timer для периодической проверки Caps Lock и деактивации микрофона
             System.Timers.Timer capsLockTimer = new System.Timers.Timer(100); // Проверяем каждые 100 мс
             capsLockTimer.Elapsed += (sender, e) =>
             {
@@ -359,19 +362,18 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
                 if (capsLockState && _isRecording)
                 {
-                    // Console.WriteLine("Caps Lock активирован. Деактивация микрофона...");
                     _isRecording = false;
                     _audioBuffer.Clear();
                 }
             };
+            capsLockTimer.AutoReset = true;
             capsLockTimer.Start();
 
-            // Set initial Caps Lock state
             _lastCapsLockState = IsCapsLockActive();
 
             waveIn.StartRecording();
 
-            _ = Task.Run(async () => await ProcessAudioQueue(waveIn));
+            _ = Task.Run(async () => await ProcessAudioQueue(waveIn)); // Pass _httpClient
             _ = Task.Run(async () => await ProcessRequestQueue());
             _ = Task.Run(async () => await ProcessTtsQueue());
 
@@ -401,24 +403,31 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     {
                         var proxySettings = input.Substring("proxy ".Length);
                         var settings = proxySettings.Split(' ');
+                        string? proxyUsername = _proxyUsername;
+                        string? proxyPassword = _proxyPassword;
                         if (settings.Length == 1)
                         {
                             _proxyAddress = settings[0];
-                            _proxyUsername = null;
-                            _proxyPassword = null;
+                            proxyUsername = null;
+                            proxyPassword = null;
                         }
                         else if (settings.Length == 3)
                         {
                             _proxyAddress = settings[0];
-                            _proxyUsername = settings[1];
-                            _proxyPassword = settings[2];
+                            proxyUsername = settings[1];
+                            proxyPassword = settings[2];
                         }
                         else
                         {
                             Console.WriteLine("Invalid proxy settings.");
                         }
+                        _proxyUsername = proxyUsername;
+                        _proxyPassword = proxyPassword;
                         Console.WriteLine($"Proxy settigns updated to: {_proxyAddress} user: {_proxyUsername}");
-
+                        // Recreate the HttpClient with new proxy settings
+                        // Dispose old HttpClient and create a new one
+                        _httpClient?.Dispose();
+                        _httpClient = CreateHttpClient();
 
                     }
                     else
@@ -430,13 +439,52 @@ GLaDOS всегда пытается шутить о нем остроумно, 
 
             Console.WriteLine("Chat ended.");
             _tts?.Dispose();
+            _outputDevice?.Stop(); // Stop playback before disposing
             _outputDevice?.Dispose();
+            _httpClient?.Dispose(); // Dispose the HttpClient when exiting
+
         }
 
-        private static async Task EnqueueScreenAnalysis()
+        private static HttpClient CreateHttpClient()
         {
-            await Task.Run(() => _requestQueue.Enqueue(async () => await AnalyzeScreen()));
+            HttpClient httpClient;
+            if (!string.IsNullOrEmpty(_proxyAddress))
+            {
+                Console.WriteLine("Using proxy server.");
+                var handler = new HttpClientHandler();
+
+                if (_proxyAddress.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
+                {
+                    var uriBuilder = new UriBuilder(_proxyAddress);
+                    handler.Proxy = new WebProxy(uriBuilder.Uri)
+                    {
+                        Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
+                            ? new NetworkCredential(_proxyUsername, _proxyPassword)
+                            : null
+                    };
+                }
+                else
+                {
+                    var proxySettings = _proxyAddress.Split(':');
+                    string address = $"{proxySettings[0]}:{proxySettings[1]}";
+                    handler.Proxy = new WebProxy(address)
+                    {
+                        Credentials = !string.IsNullOrEmpty(_proxyUsername) && !string.IsNullOrEmpty(_proxyPassword)
+                            ? new NetworkCredential(_proxyUsername, _proxyPassword)
+                            : null
+                    };
+                }
+
+                httpClient = new HttpClient(handler);
+            }
+            else
+            {
+                httpClient = new HttpClient();
+            }
+            httpClient.Timeout = TimeSpan.FromSeconds(_responseTimeout);
+            return httpClient;
         }
+
 
         private static byte[] CaptureScreen(bool saveToFile = false)
         {
@@ -446,54 +494,42 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 return Array.Empty<byte>();
             }
 
-            int screenWidth = 3840; // Разрешение для захвата двух мониторов с разрешениями 1920x1080
-            int screenHeight = 1080;
-            var bmp = new Bitmap(screenWidth, screenHeight);
-            using (var grfx = Graphics.FromImage(bmp))
+            int screenWidth = 3840; //Разрешение для захвата двух мониторов с разрешениями 1920x1080
+            int screenHeight = 1080; // Переменной "screenHeight" присвоено значение, но оно ни разу не использовано.
+
+            // Use 'using' statement to ensure the Bitmap is disposed of properly.
+            using (var bmp = new Bitmap(screenWidth, screenHeight, PixelFormat.Format32bppArgb))
             {
-                grfx.CopyFromScreen(0, 0, 0, 0, bmp.Size);
-            }
-
-            byte[] imageBytes;
-            using (var memoryStream = new MemoryStream())
-            {
-                //сохранить в пнг
-                //if (saveToFile)
-                //{
-                //    string fileName = $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.png"; // Формат PNG
-                //    string filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-
-                //    bmp.Save(filePath, ImageFormat.Png); // Сохраняем как PNG
-                //    Console.WriteLine($"Скриншот сохранен в: {filePath}");
-                //}
-
-                // или жпег
-                var jpegEncoder = GetEncoder(ImageFormat.Jpeg);
-                var encoderParams = new EncoderParameters(1);
-                encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 80L);
-
-                if (saveToFile)
+                using (var grfx = Graphics.FromImage(bmp))
                 {
-                    string fileName = $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.jpg"; // Формат JPG
-                    string filePath = Path.Combine(Directory.GetCurrentDirectory(), fileName);
-
-
-                    bmp.Save(filePath, jpegEncoder, encoderParams); // Сохраняем как жпег на диск
-                    Console.WriteLine($"Скриншот сохранен в: {filePath}");
+                    grfx.CopyFromScreen(0, 0, 0, 0, bmp.Size);
                 }
 
-                // передать апи в пнг
-                // bmp.Save(memoryStream, ImageFormat.Png);
-                // передать апи в жпег
-                bmp.Save(memoryStream, jpegEncoder, encoderParams); // Сохраняем в memoryStream как жпег
+                byte[] imageBytes;
 
-                imageBytes = memoryStream.ToArray();
+                // Use 'using' statement to ensure the MemoryStream is disposed of properly.
+                using (var memoryStream = new MemoryStream())
+                {
+                    ImageCodecInfo? jpegEncoder = GetEncoder(ImageFormat.Jpeg);
+                    var encoderParams = new EncoderParameters(1);
+                    encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 50L);
+                    if (jpegEncoder != null)
+                    {
+                        bmp.Save(memoryStream, jpegEncoder, encoderParams); // Сохраняем в memoryStream как жпег
+                    }
+                    else
+                    {
+                        bmp.Save(memoryStream, ImageFormat.Jpeg); // Сохраняем в memoryStream как жпег
+                    }
+
+                    imageBytes = memoryStream.ToArray();
+                }
+
+                return imageBytes;
             }
-
-            return imageBytes;
         }
 
-        private static ImageCodecInfo GetEncoder(ImageFormat format)
+        private static ImageCodecInfo? GetEncoder(ImageFormat format)
         {
             ImageCodecInfo[] codecs = ImageCodecInfo.GetImageDecoders();
             foreach (ImageCodecInfo codec in codecs)
@@ -506,79 +542,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             return null;
         }
 
-        private static async Task AnalyzeScreen()
-        {
-            try
-            {
-                // Console.WriteLine("Analyzing screen...");
-                byte[] imageBytes = CaptureScreen(); // (true) чтобы включить сохранение скриншотов для отладки
-                if (imageBytes.Length == 0)
-                {
-                    return; // если захват не удался, выходим
-                }
-
-                var parts = new List<Part>
-        {
-            new Part
-            {
-                InlineData = new GenerativeContentBlob() {
-                    Data = Convert.ToBase64String(imageBytes),
-                    //MimeType = "image/png" // для скриншотов в пнг
-                    MimeType = "image/jpeg" // для скриншотов в жпеге
-                }
-            },
-
-        };
-
-                if (_chat != null)
-                {
-                    using (var cts = new CancellationTokenSource(_responseTimeout))
-                    {
-                        var resultTask = _chat.SendMessageAsync(parts.ToArray(), cts.Token);
-
-                        var completedTask = await Task.WhenAny(resultTask, Task.Delay(_responseTimeout, cts.Token));
-
-                        if (completedTask == resultTask)
-                        {
-                            var result = await resultTask;
-                            if (result?.Candidates != null && result.Candidates.Any())
-                            {
-                                string? visionDescription = result.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
-                                if (!string.IsNullOrEmpty(visionDescription))
-                                {
-                                    visionDescription = visionDescription.Replace("*", "");
-                                    Console.WriteLine($"GLaDOS (подсматривает): {visionDescription}");
-                                    _ttsQueue.Enqueue(visionDescription);
-                                }
-                                else
-                                {
-                                    Console.WriteLine("GLaDOS (подсматривает): No text in response.");
-                                }
-                            }
-                            else
-                            {
-                                Console.WriteLine("GLaDOS (подсматривает): No candidates in response.");
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine("GLaDOS (подсматривает): Не ответила вовремя (таймаут).");
-                            cts.Cancel();
-                        }
-                    }
-                }
-                else
-                {
-                    Console.WriteLine("Chat session is not initialized.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error analyzing screen: {ex.Message}");
-            }
-        }
-
-
         private static double CalculateAverageAmplitude(byte[] buffer)
         {
             double sum = 0;
@@ -589,7 +552,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             return sum / (buffer.Length / 2) / short.MaxValue;
         }
 
-        private static async Task ProcessAudioQueue(WaveInEvent waveIn)
+        private static async Task ProcessAudioQueue(WaveInEvent waveIn) // Add _httpClient
         {
             while (true)
             {
@@ -599,7 +562,11 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     byte[] bufferToProcess = _audioQueue.Dequeue();
                     try
                     {
-                        await ProcessAudioBuffer(waveIn, bufferToProcess, waveIn.WaveFormat); // Передаем waveFormat
+                        _requestQueue.Enqueue(async () =>
+                        {
+                            await ProcessAudioBuffer(waveIn, bufferToProcess, waveIn.WaveFormat); // Pass _httpClient
+                        });
+
                     }
                     finally
                     {
@@ -609,30 +576,16 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                 await Task.Delay(1);
             }
         }
-        private static async Task ProcessAudioBuffer(WaveInEvent waveIn, byte[] buffer, WaveFormat waveFormat)
+        private static async Task ProcessAudioBuffer(WaveInEvent waveIn, byte[] buffer, WaveFormat waveFormat) // Add _httpClient
         {
             try
             {
-                // Сохраняем аудио в файл для отладки
-                //string debugAudioPath = Path.Combine(Directory.GetCurrentDirectory(), $"debug_audio_{DateTime.Now:yyyyMMdd_HHmmss_fff}.wav");
-                //try
-                //{
-                //    using (WaveFileWriter waveFileWriter = new WaveFileWriter(debugAudioPath, waveFormat))
-                //    {
-                //        waveFileWriter.Write(buffer, 0, buffer.Length);
-                //    }
-                //    Console.WriteLine($"Сохранено аудио для отладки: {debugAudioPath}");
-                //}
-                //catch (Exception ex)
-                //{
-                //    Console.WriteLine($"Ошибка при сохранении отладочного аудио: {ex.Message}");
-                //}
 
                 // Захватываем скриншот
                 byte[] imageBytes = CaptureScreen();
 
                 // Отправляем WAV файл и скриншот напрямую в Gemini API
-                string geminiResponse = await SendAudioAndImageWithRetries(buffer, waveFormat, imageBytes);
+                string geminiResponse = await SendAudioAndImageWithRetries(buffer, waveFormat, imageBytes); // Pass _httpClient
                 if (!string.IsNullOrEmpty(geminiResponse))
                 {
                     _ttsQueue.Enqueue(geminiResponse);
@@ -670,167 +623,147 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             }
         }
 
-        private static async Task<string> SendAudioAndImageWithRetries(byte[] audioData, WaveFormat waveFormat, byte[] imageBytes)
+        private static async Task<string> SendAudioAndImageWithRetries(byte[] audioData, WaveFormat waveFormat, byte[] imageBytes) // Add HttpClient parameter
         {
             int retries = 0;
             while (retries < _maxRetries)
             {
+                string tempAudioPath = Path.GetTempFileName() + ".wav";
+                string tempImagePath = Path.GetTempFileName() + ".jpg";
+
                 try
                 {
-                    // Конвертируем byte[] в Stream, чтобы отправить в Part
-                    using (MemoryStream audioStream = new MemoryStream(audioData))
+                    using (var wavStream = new MemoryStream())
                     {
-                        // Сохраняем аудио в формате WAV в MemoryStream
-                        using (MemoryStream wavStream = new MemoryStream())
+                        using (WaveFileWriter waveFileWriter = new WaveFileWriter(wavStream, waveFormat))
                         {
-                            using (WaveFileWriter waveFileWriter = new WaveFileWriter(wavStream, waveFormat))
-                            {
-                                waveFileWriter.Write(audioData, 0, audioData.Length);
-                            }
-                            // Получаем byte[] из MemoryStream с WAV
-                            byte[] wavBytes = wavStream.ToArray();
-
-                            var parts = new List<Part>
-                            {
-                                new Part
-                                {
-                                    InlineData = new GenerativeContentBlob()
-                                    {
-                                        Data = Convert.ToBase64String(wavBytes), // Отправляем WAV как base64
-                                        MimeType = "audio/wav" // Указываем MIME type
-                                    }
-                                },
-                                 new Part
-                                {
-                                  InlineData = new GenerativeContentBlob() {
-                                    Data = Convert.ToBase64String(imageBytes),
-                                    //MimeType = "image/png" // для скриншотов в пнг
-                                    MimeType = "image/jpeg"  // для скриншотов в жпеге
-                                }
-                                }
-
-                            };
-
-
-                            if (_chat != null)
-                            {
-                                using (var cts = new CancellationTokenSource(_responseTimeout))
-                                {
-                                    var resultTask = _chat.SendMessageAsync(parts.ToArray(), cts.Token);
-
-                                    var completedTask = await Task.WhenAny(resultTask, Task.Delay(_responseTimeout, cts.Token));
-
-                                    if (completedTask == resultTask)
-                                    {
-                                        var result = await resultTask;
-                                        if (result?.Candidates != null && result.Candidates.Any())
-                                        {
-                                            string? geminiResponse = result.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
-                                            if (!string.IsNullOrEmpty(geminiResponse))
-                                            {
-                                                geminiResponse = geminiResponse.Replace("*", "");
-                                                Console.WriteLine($"GLaDOS: {geminiResponse}\n");
-                                                return geminiResponse;
-                                            }
-                                        }
-                                        Console.WriteLine("Gemini API не вернул текст.");
-                                        return string.Empty;
-                                    }
-                                    else
-                                    {
-                                        Console.WriteLine("GLaDOS не ответила вовремя (таймаут).");
-                                        cts.Cancel();
-                                        return string.Empty;
-                                    }
-                                }
-                            }
-                            Console.WriteLine("Chat session is not initialized.");
-                            return string.Empty;
-
+                            waveFileWriter.Write(audioData, 0, audioData.Length);
                         }
-
+                        File.WriteAllBytes(tempAudioPath, wavStream.ToArray());
                     }
-                }
-                catch (GenerativeAI.Exceptions.GenerativeAIException ex) when (ex.Message.Contains("RESOURCE_EXHAUSTED"))
-                {
-                    retries++;
-                    int delay = (int)Math.Pow(2, retries);
-                    Console.WriteLine($"Error: {ex.Message}, retrying in {delay} seconds");
-                    await Task.Delay(delay * 1000);
+
+                    File.WriteAllBytes(tempImagePath, imageBytes);
+
+                    var request = new GenerateContentRequest();
+                    request.AddInlineFile(tempAudioPath);
+                    request.AddInlineFile(tempImagePath);
+
+                    if (_model != null && _chat != null)
+                    {
+                        GenerateContentResponse result = await _chat.GenerateContentAsync(request);
+                        if (result?.Candidates != null && result.Candidates.Any())
+                        {
+                            string? visionDescription = result.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
+
+                            if (!string.IsNullOrEmpty(visionDescription))
+                            {
+                                visionDescription = visionDescription.Replace("*", "");
+                                Console.WriteLine($"GLaDOS: {visionDescription}");
+                                return visionDescription;
+                            }
+                            else
+                            {
+                                Console.WriteLine("GLaDOS: No text in response.");
+                                return string.Empty;
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("Gemini не дал ответа, или произошла ошибка.");
+                            return string.Empty;
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Chat session is not initialized.");
+                        return string.Empty;
+                    }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Error sending audio: {ex.Message}");
                     return string.Empty;
                 }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(tempAudioPath)) File.Delete(tempAudioPath);
+                        if (File.Exists(tempImagePath)) File.Delete(tempImagePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error deleting temporary files: {ex.Message}");
+                    }
+                    retries++;
+                    await Task.Delay(1000 * retries);
+                }
             }
             Console.WriteLine($"Failed to send message after {_maxRetries} retries.");
             return string.Empty;
         }
-        private static async Task<string> SendWithRetries(string text, byte[] imageBytes)
+
+        private static async Task<string> SendImageToGemini(byte[] imageBytes) // Add HttpClient
         {
-            int retries = 0;
-            while (retries < _maxRetries)
+            string result = string.Empty; // Default value
+            try
             {
-                try
+                string tempImagePath = Path.GetTempFileName() + ".jpg";
+                File.WriteAllBytes(tempImagePath, imageBytes);
+
+                var request = new GenerateContentRequest();
+                //request.AddText(_gLaDOSPrompt);
+                request.AddInlineFile(tempImagePath);
+
+                if (_model != null && _chat != null)
                 {
-                    var parts = new List<Part>
+                    GenerateContentResponse geminiResult = await _chat.GenerateContentAsync(request);
+                    if (geminiResult?.Candidates != null && geminiResult.Candidates.Any())
                     {
-                         new Part
+                        string? visionDescription = geminiResult.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
+
+                        if (!string.IsNullOrEmpty(visionDescription))
                         {
-                          InlineData = new GenerativeContentBlob() {
-                            Data = Convert.ToBase64String(imageBytes),
-                            //MimeType = "image/png" // для скриншотов в пнг
-                            MimeType = "image/jpeg"  // для скриншотов в жпеге
+                            visionDescription = visionDescription.Replace("*", "");
+                            Console.WriteLine($"GLaDOS (подсматривает): {visionDescription}");
+                            result = visionDescription;
                         }
-                        },
-                        new Part { Text = text }
-                    };
-                    if (_chat != null)
-                    {
-                        using (var cts = new CancellationTokenSource(_responseTimeout))
+                        else
                         {
-                            var resultTask = _chat.SendMessageAsync(parts.ToArray(), cts.Token);
-
-                            var completedTask = await Task.WhenAny(resultTask, Task.Delay(_responseTimeout, cts.Token));
-
-                            if (completedTask == resultTask)
-                            {
-                                var result = await resultTask;
-                                if (result?.Candidates != null && result.Candidates.Any())
-                                {
-                                    string? geminiResponse = result.Candidates.FirstOrDefault()?.Content?.Parts?.FirstOrDefault()?.Text;
-                                    if (!string.IsNullOrEmpty(geminiResponse))
-                                    {
-                                        geminiResponse = geminiResponse.Replace("*", "");
-                                        Console.WriteLine($"GLaDOS: {geminiResponse}\n");
-                                        return geminiResponse;
-                                    }
-                                }
-                                return string.Empty;
-                            }
-                            else
-                            {
-                                Console.WriteLine("GLaDOS не ответила вовремя (таймаут).");
-                                cts.Cancel();
-                                return string.Empty;
-                            }
+                            Console.WriteLine("GLaDOS (подсматривает): No text in response.");
+                            result = string.Empty;
                         }
                     }
-                    return string.Empty;
-
+                    else
+                    {
+                        Console.WriteLine("Gemini не дал ответа, или произошла ошибка.");
+                        result = string.Empty;
+                    }
                 }
-                catch (GenerativeAI.Exceptions.GenerativeAIException ex) when (ex.Message.Contains("RESOURCE_EXHAUSTED"))
+                else
                 {
-                    retries++;
-                    int delay = (int)Math.Pow(2, retries);
-                    Console.WriteLine($"Error: {ex.Message}, retrying in {delay} seconds");
-                    await Task.Delay(delay * 1000);
+                    Console.WriteLine("Chat session is not initialized.");
+                    result = string.Empty;
                 }
+                try
+                {
+                    File.Delete(tempImagePath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error deleting temporary files: {ex.Message}");
+                }
+
             }
-            Console.WriteLine($"Failed to send message after {_maxRetries} retries.");
-            return string.Empty;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending image: {ex.Message}");
+                result = string.Empty;
+            }
+            return result;
         }
+
+
         private static async Task ProcessTtsQueue()
         {
             while (true)
@@ -855,38 +788,35 @@ GLaDOS всегда пытается шутить о нем остроумно, 
             {
                 try
                 {
-                    // Console.WriteLine($"Synthesizing: {text}");
                     var audio = _tts.Generate(text, 1.0f, 0);
 
-                    string outputFilename = Path.Combine(Directory.GetCurrentDirectory(), $"output_{Guid.NewGuid()}.wav");
-                    bool success = audio.SaveToWaveFile(outputFilename);
-
-                    if (success)
+                    if (audio != null && audio.Samples != null && audio.SampleRate > 0)
                     {
-                        // Console.WriteLine($"Successfully saved audio to {outputFilename}");
-                        using (var audioFile = new AudioFileReader(outputFilename))
-                        {
-                            _outputDevice = new WaveOutEvent();
-                            _outputDevice.Init(audioFile);
-                            _outputDevice.PlaybackStopped += async (sender, e) =>
-                            {
-                                _isTtsPlaying = false;
-                                _outputDevice?.Dispose();
-                                _outputDevice = null;
+                        float[] samples = audio.Samples;
+                        int sampleRate = audio.SampleRate;
 
-                                await Task.Delay(100); // Даем время на освобождение файла
-                                try
+                        byte[] byteBuffer = new byte[samples.Length * 4];
+
+                        Buffer.BlockCopy(samples, 0, byteBuffer, 0, byteBuffer.Length);
+
+                        WaveFormat waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
+
+                        //Use 'using' statement to ensure the waveStream
+                        using (var waveStream = new RawSourceWaveStream(new MemoryStream(byteBuffer), waveFormat))
+                        {
+                            // Create _outputDevice only if it's null
+                            if (_outputDevice == null)
+                            {
+                                _outputDevice = new WaveOutEvent();
+                                _outputDevice.PlaybackStopped += (sender, e) =>
                                 {
-                                    if (File.Exists(outputFilename))
-                                    {
-                                        File.Delete(outputFilename);
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"Error deleting file: {ex.Message}");
-                                }
-                            };
+                                    _isTtsPlaying = false;
+                                    //_outputDevice?.Dispose(); // Don't dispose here, dispose in Main
+                                    //_outputDevice = null;
+                                };
+                            }
+
+                            _outputDevice.Init(waveStream);
                             _isTtsPlaying = true;
                             _outputDevice.Play();
 
@@ -898,7 +828,7 @@ GLaDOS всегда пытается шутить о нем остроумно, 
                     }
                     else
                     {
-                        Console.WriteLine($"Failed to save audio to {outputFilename}");
+                        Console.WriteLine("TTS generated no audio data.");
                     }
                 }
                 catch (Exception ex)
@@ -912,7 +842,6 @@ GLaDOS всегда пытается шутить о нем остроумно, 
         {
             if (_outputDevice != null && _outputDevice.PlaybackState == PlaybackState.Playing)
             {
-                // Console.WriteLine("Stopping TTS playback.");
                 _outputDevice.Stop();
                 _isTtsPlaying = false;
             }
